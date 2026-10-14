@@ -223,18 +223,15 @@ Each movement uses a group of ten text-list values. For movement number **24**, 
 
 **Text-list base value = `manualMoveNo × 10`**
 
-| Value | Label represented by the entry |
-|---|---|
-| `240` | Function name, symbolic display |
-| `241` | Function name, absolute display |
-| `242` | Left movement active, symbolic display |
-| `243` | Left movement active, absolute display |
-| `244` | Left end position, symbolic display |
-| `245` | Left end position, absolute display |
-| `246` | Right movement active, symbolic display |
-| `247` | Right movement active, absolute display |
-| `248` | Right end position, symbolic display |
-| `249` | Right end position, absolute display |
+Use the **global movement number assigned during initialization**, not the visible HMI row number or the station-local `attributes.movementNo`. Paging changes which movement a screen row displays; it does not change that movement's text-list group. Each symbolic entry is followed by its absolute-display counterpart: **absolute text index = symbolic text index + 1**.
+
+The following figure maps the text-list entries to the HMI fields and shows the associated display attributes, status signals and invisible command buttons. It uses a PROFIDrive jog row with global movement number **1** (entries **10–19**). For movement **24** in this procedure, use **240–249** instead; the offsets within each group are identical.
+
+![Original HMI setup row with numbered text fields, symbolic and absolute text-list indices, display attributes, interlock indications and invisible command buttons](images/manual-operation/11-setup-row-text-list-and-bits.png)
+
+*The German annotations refer to `(DB) ManualMovements.movements[x]`, with **A** for `attributes` and **C** for `control`. The display-selection button below the tables switches between symbolic and absolute labels. [Open the scalable figure](images/manual-operation/11-setup-row-text-list-and-bits.svg).*
+
+For movement **24**, locate entries **240–249** in the `Setup` text list as shown below.
 
 ![HMI Setup text list with the values 240 through 249 marked for movement 24](images/manual-operation/07-setup-text-list-240-249.png)
 
