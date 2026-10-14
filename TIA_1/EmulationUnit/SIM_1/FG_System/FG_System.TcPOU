@@ -130,8 +130,8 @@ GVL_PLC.Inputs.I50.0 :=  NOT SS_EStop1.bValue;
 GVL_PLC.Inputs.I51.0 :=  NOT SS_EStop1.bValue;
 GVL_PLC.Inputs.I50.1 :=  NOT SS_EStop2.bValue;
 GVL_PLC.Inputs.I51.1 :=  NOT SS_EStop2.bValue;
-SS_EStop1.bEnable := GVL_PLC.Outputs.Q0.0;
-SS_EStop2.bEnable := GVL_PLC.Outputs.Q0.2;
+SS_EStop1.bEnable := GVL_PLC.Outputs.Q2.0;
+SS_EStop2.bEnable := GVL_PLC.Outputs.Q2.2;
 
 // TODO: NO ADDRESS IN PLCTags_ControlPanel.xlsx for the six B_SafetyDoor*
 // (FB_Lock). Each needs TWO inputs and ONE output - closed, locked, and the lock
