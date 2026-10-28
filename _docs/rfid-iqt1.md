@@ -8,6 +8,43 @@ simulated by `FB_RFID_IQT1` in `TIA_1/EmulationUnit/SIM_1/Library/RFID_IQT1/`.
 **Status: behaviour model only.** The block exists in the library and compiles, but no function
 group uses it yet. There are no telegram addresses and no twin device for it.
 
+## How the tag gets to TwinCAT
+
+The tag and its data come from Open Commissioning's **product data** on the Unity side
+(`OC_Unity_Core`, `Runtime/Scripts/Data` and `Components/TagReader.cs`):
+
+1. A payload carries a **`PayloadTag`**. When the payload is enabled, OC writes its product data
+   file into every product data directory listed in the tag's `DirectoryId`.
+2. A **Payload Tag Reader** (`TagReader`, link type `FB_Reader`) puts the payload's `UniqueId` on
+   `StatusData` while the payload is in its volume, and 0 when it leaves. That number is the
+   **MDS number**.
+3. `FB_RFID_IQT1` **extends OC_Core `FB_Reader`**, so it receives that number as `nResult`. On
+   each read or write it opens the payload's file from the **`sDirectory`** input.
+
+| | Unity side (OC `ProductDataFactory`) | `FB_RFID_IQT1` |
+|---|---|---|
+| Folder | a `ProductDataDirectory` path; `streamingassets:` resolves to `Application.streamingAssetsPath` | `sDirectory`, the same folder as an absolute path. A trailing `\` or `/` is optional |
+| File | `ID<UniqueId>.data`, UniqueId in decimal | the same, from `stConfig.sFilePrefix` / `sFileExtension` |
+| Content | 32,000 bytes, packed by the template `Type<TypeId>.xml` in the same folder | the head's user memory: byte address *n* is byte *n* of the file |
+
+The file is read **whole** and written back **whole**, so it never changes size under Unity. It is
+reloaded on every command and never cached. A write is answered only after the file is written,
+so the next head reads it back.
+
+## What to know about the data
+
+- **Unity rewrites the file** from its template whenever the payload is enabled. Data the PLC
+  wrote is gone when the payload is created again, for example after a scene restart.
+- **No template, no file:** if the folder has no `Type<TypeId>.xml`, Unity writes nothing. The
+  head then creates a zeroed 32,000-byte file on its first access, so the tag reads as blank.
+- **Byte order:** OC packs `INT16`, `INT32`, `UINT16` and `UINT32` entries little-endian (.NET
+  `BitConverter`), but the S7 reads big-endian. `CHARS` and `BYTES` entries are byte-exact. A
+  numeric entry the TIA program reads must be swapped on one side, or stored as `BYTES`.
+- **One folder per data path:** a `PayloadTag` with several `DirectoryId`s gets one independent
+  copy per folder. Heads that should see each other's writes must use the **same** `sDirectory`.
+- **Built player:** a `streamingassets:` directory resolves to `<Build>_Data\StreamingAssets\…`
+  in the player, but to `Assets\StreamingAssets\…` in the editor. Give `sDirectory` the one in use.
+
 ## Where the behaviour comes from
 
 The telegram is derived from the **master side**, the P+F block, not from the P+F manual. Every
@@ -15,17 +52,10 @@ byte the model writes is one the block reads or tests. Where the block leaves a 
 model uses a value the block reads correctly. Those choices are listed under
 [Open points](#open-points).
 
-Built the Open Commissioning way, like the [lift drives](lift-drives.md):
-
-- **Process data:** `pControl` / `pStatus` point into the PLCSIM image. It is bytes only, so
-  nothing is swapped; the address and count words in the telegram are high byte first.
-- **The tag:** the twin's **DataReader** says which tag is in front of the head, the same device
-  type the cameras use. `Control.1` triggers a read, `Status.1` echoes it, and `StatusData` is the
-  64-bit tag UID. A UID of 0, or no echo because Unity is not connected, means **no tag**.
-  `bSimulateTag` + `nSimulatedUid` bypass the twin for testing.
-- **The tag's memory:** one file per tag, written and read with OC_Core **`FB_FileIO`**. The file
-  is reloaded on every command and never cached. Every head that shares the folder sees the same
-  tags, so data written at one station is read back at the next.
+Built the Open Commissioning way, like the [lift drives](lift-drives.md): `pControl` / `pStatus`
+point into the PLCSIM image. It is bytes only, so nothing is swapped; the address and count words
+in the telegram are high byte first. For testing without Unity, `bSimulateTag` + `nSimulatedUid`
+replace the reader.
 
 ## Telegram layout
 
@@ -62,13 +92,15 @@ has consumed the last one is lost.
 
 ## Commands
 
+The tag is sampled when the command starts: a `UniqueId` of 0 is **no tag**.
+
 | Code | Command | Answer |
 |---|---|---|
 | `16#04` | Change Tag (the block's init) | `00`. Any tag type is accepted |
 | `16#02` | Quit | `00` |
-| `16#10` | Single Read 4-byte block | `00` + data, fragmented. `04` if the range leaves the tag memory or exceeds 192 bytes. `05` without a tag |
-| `16#40` | Single Write 4-byte block | `00` once the tag file is written. `04` if the range leaves the tag memory or exceeds 22 bytes. `05` without a tag |
-| `16#01` | Single Read Fixcode | `00` + the 8 UID bytes, most significant first. `05` without a tag |
+| `16#10` | Single Read 4-byte block | `00` + data, fragmented. `04` if the range leaves `stConfig.nMemorySize` or exceeds 192 bytes, if `sDirectory` is empty, or on a file error. `05` without a tag |
+| `16#40` | Single Write 4-byte block | `00` once the file is written. `04` if the range leaves `stConfig.nMemorySize` or exceeds 22 bytes, if `sDirectory` is empty, or on a file error. `05` without a tag |
+| `16#01` | Single Read Fixcode | `00` + the 8-byte `UniqueId`, most significant first. `05` without a tag |
 | `16#19` `16#1A` `16#1D` | Enhanced Read / Write / Read Fixcode | `04`: not modelled |
 | other | Special (tunnelled) commands | `04`: not modelled |
 
@@ -76,28 +108,16 @@ Status `00` = OK, `04` = error, `05` = no data carrier. These are the only codes
 evaluates. A no-tag answer is exactly frame length 7, telegram length 4 and status `05`, which is
 the pattern the block tests for.
 
-## Tag files
+## Parameters
 
-| Parameter | Default |
-|---|---|
-| Folder `stConfig.sDirectory` | `C:\TwinCAT\RFID\`. Only the last level is created; the parent must exist |
-| File | `Tag_<UID as 16 hex digits>.bin`, e.g. `Tag_E004015012345678.bin` |
-| Content | the tag's raw user memory, `stConfig.nMemorySize` bytes (2048, at most 8192) |
-| A tag seen for the first time | starts with zeroed memory. `FB_FileIO.Read` creates a missing file from the cleared buffer |
-
-To give a pallet a preset memory, write its file before the run, or delete it to start blank.
-A file error (`nFileErrorId`) answers `04`.
-
-## Timing
-
-| Parameter | Default | Meaning |
+| | Default | Meaning |
 |---|---|---|
-| `tAccessTime` | 30 ms | modelled air time per command, after the tag is known |
-| `tSettle` | 20 ms | DataReader: hold after the trigger echo before sampling the UID |
-| `tAcquireTimeout` | 500 ms | DataReader: no answer in this time means no tag |
-
-These are modelled, not measured. They must stay well inside the block's `I_T_Timeout` (10 s by
-default).
+| `sDirectory` (input) | — | folder of the product data files, as above |
+| `stConfig.sFilePrefix` / `sFileExtension` | `ID` / `.data` | OC's file name. Change only together with the Unity side |
+| `stConfig.nMemorySize` | 32000 | bytes the PLC may address. Set the real tag's size to get `04` beyond it |
+| `stConfig.nMaxReadLength` | 192 | bytes per Single Read; the block's `ReadData` holds 192 |
+| `stConfig.tAccessTime` | 30 ms | modelled air time per command. Must stay well inside the block's `I_T_Timeout` (10 s) |
+| `stConfig.nPQI` | `16#A0` | IO-Link port qualifier, shown by the block only |
 
 ## Not modelled
 
@@ -117,5 +137,8 @@ still filled by the block from its own clock).
 - **A continuation frame of exactly 4 data bytes** has frame length 7. If its data bytes `[4]` and
   `[6]` happen to be `16#04` and `16#05`, the block mistakes it for a no-tag answer. This is
   harmless for any other length.
-- **Next step:** instance the head in a function group, assign the telegram addresses from the TIA
-  hardware configuration, and add a DataReader for it to the twin.
+- **Next step:**
+  - Put a `TagReader` and `PayloadTag`s in the twin, with a product data directory and template.
+  - Make the reader's link an `FB_RFID_IQT1` instead of the default `FB_Reader`.
+  - Instance the head in a function group, setting `sDirectory` and the telegram addresses from
+    the TIA hardware configuration.

@@ -28,14 +28,19 @@
 	[7..31] the first 25 data bytes. Each further frame: [1], [2], then 29 data bytes in
 	[3..31]. That is the block's ReadData layout: 0, 25, 54, 83 ...
 
-	Which tag is in front of the head is the twin's to say, through the same DataReader
-	FB_Camera uses: Control.1 triggers a read, Status.1 echoes it, StatusData is the
-	64 bit tag UID. 0, or no echo at all because Unity is not connected, is NO TAG and
-	answered 16#05 - the honest outcome. bSimulateTag bypasses the twin for testing.
+	WHICH TAG is in front of the head is the twin's to say, the Open Commissioning way.
+	A Payload Tag Reader in Unity (OC TagReader, link type FB_Reader - this block extends
+	it) puts the UniqueId of the tagged payload in its volume on StatusData, and 0 when it
+	leaves. That UniqueId is the MDS number. 0 is NO TAG and is answered 16#05.
+	bSimulateTag bypasses the twin for testing.
 
-	What the tag CARRIES lives in a file per UID, read and written with OC_Core FB_FileIO.
-	It is reloaded on every command and never cached: another head may have written the
-	tag since, and that is exactly how data travels with the pallet between stations.
+	WHAT THE TAG CARRIES is that payload's product data file - the file OC writes on the
+	Unity side (OC.Data.ProductDataFactory): <sDirectory>ID<UniqueId>.data, 32000 bytes,
+	packed by the template Type<TypeId>.xml in the same folder. sDirectory must be the
+	folder the Unity ProductDataDirectory resolves to. The head's user memory IS that
+	file: byte address n is byte n of the file. It is read and written whole with OC_Core
+	FB_FileIO, so the file never changes size, and reloaded on every command - another
+	head or Unity may have written it since, which is how data travels with the payload.
 
 	Modelled: Change Tag, Quit, Single Read, Single Write, Single Read Fixcode (UID).
 	Not modelled: the Enhanced (continuous) commands and Special commands - answered
@@ -46,18 +51,22 @@
 	or Siemens. The real head may behave differently.
 *)
 {attribute 'reflection'}
-FUNCTION_BLOCK FB_RFID_IQT1 EXTENDS FB_LinkDataLWord
+FUNCTION_BLOCK FB_RFID_IQT1 EXTENDS FB_Reader
 VAR_INPUT
 	pControl		: PVOID;	// process data from the PLC (%Q), 32 bytes - the block's OutData
 	pStatus			: PVOID;	// process data to the PLC (%I), 34 bytes - the block's InData
+	// Folder of the product data files: the path of the Unity ProductDataDirectory, resolved
+	// (a streamingassets: path is <build>_Data\StreamingAssets\...). Absolute, with or
+	// without the trailing separator.
+	sDirectory		: T_MaxString;
 	stConfig		: ST_RFID_IQT1_Config;
 	// Test override: present this tag without asking the twin. 0 = no tag.
 	bSimulateTag	: BOOL;
-	nSimulatedUid	: LWORD;
+	nSimulatedUid	: ULINT;
 END_VAR
 VAR_OUTPUT
-	bTagPresent		: BOOL;		// the last command that looked for a tag found one
-	nTagUid			: LWORD;	// its UID, 0 when none
+	bTagPresent		: BOOL;		// a tag is in front of the head now
+	nTagUid			: ULINT;	// its UniqueId - the MDS number - 0 when none
 	nLastCommand	: BYTE;		// E_RFID_IQT1_Command, as received
 	nLastStatus		: BYTE;		// E_RFID_IQT1_Status, as answered
 	nFileErrorId	: UDINT;	// error of the last tag-file access, 0 = OK
@@ -66,10 +75,11 @@ VAR CONSTANT
 	MASK_DELETE			: BYTE := 16#80;
 	MASK_UPDATE_MASTER	: BYTE := 16#40;
 	MASK_UPDATE_SLAVE	: BYTE := 16#20;
-	FIRST_FRAME_DATA	: UDINT := 25;	// data bytes in frame 1, [7..31]
-	NEXT_FRAME_DATA		: UDINT := 29;	// data bytes in every further frame, [3..31]
-	MAX_READ_LENGTH		: UDINT := 228;	// what _aFrames carries: 25 + 7 * 29
-	MAX_WRITE_LENGTH	: UDINT := 22;	// write data in one request, [10..31]
+	FIRST_FRAME_DATA	: UDINT := 25;		// data bytes in frame 1, [7..31]
+	NEXT_FRAME_DATA		: UDINT := 29;		// data bytes in every further frame, [3..31]
+	MAX_READ_LENGTH		: UDINT := 228;		// what _aFrames carries: 25 + 7 * 29
+	MAX_WRITE_LENGTH	: UDINT := 22;		// write data in one request, [10..31]
+	FILE_SIZE			: UDINT := 32000;	// what ProductDataFactory writes - and what goes back
 END_VAR
 VAR
 	{attribute 'instance-path'}
@@ -82,33 +92,38 @@ VAR
 	_aFrames			: ARRAY[0..7, 0..31] OF BYTE;	// the prepared response; [i, 0] is unused
 	_nFrameCount		: UDINT;
 	_nFrameIndex		: UDINT;						// next frame to publish
-	_aMemory			: ARRAY[0..8191] OF BYTE;		// user memory of the tag being worked on
+	_aMemory			: ARRAY[0..31999] OF BYTE;		// the product data file of the tag being worked on
 
 	_eState				: E_RFID_IQT1_State := E_RFID_IQT1_State.Init;
 	_bCommandPending	: BOOL;
 	_bAborted			: BOOL;		// Delete or Quit arrived during a file access
 	_bLoadRetried		: BOOL;		// the one retry of LoadTag is spent
+	_bNoDirectory		: BOOL;		// sDirectory was empty when the command started
 	_nCommand			: BYTE;
+	_nCommandUid		: ULINT;	// the tag the running command works on, sampled at its start
 	_nAddress			: UDINT;
 	_nLength			: UDINT;
 	_nTagType			: BYTE;		// from Change Tag; kept for the watch window only
 	_nMemorySize		: UDINT;
+	_sDirectory			: T_MaxString;	// sDirectory with its trailing separator
+	_sCheckedDirectory	: T_MaxString;	// the folder CreateDir last made sure of
 	_sFileName			: T_MaxString;
-	_nAcquireStep		: INT;
 
 	_fbFileIO			: FB_FileIO;
 	_fbCreateDir		: FB_CreateDir;
-	_tonAcquire			: TON;
-	_tonSettle			: TON;
 	_tonAccess			: TON;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[SUPER^();
+      <ST><![CDATA[SUPER^();	// FB_Reader: nResult := StatusData, the UniqueId from the TagReader
 InitRun();
 
-// The head is powered whenever the emulation runs. Bit 0 is the DataReader's enable.
-Control.0 := TRUE;
+IF bSimulateTag THEN
+	nTagUid := nSimulatedUid;
+ELSE
+	nTagUid := nResult;
+END_IF
+bTagPresent := nTagUid <> 0;
 
 IF pControl = 0 OR pStatus = 0 THEN RETURN; END_IF
 
@@ -125,62 +140,18 @@ METHOD PRIVATE AbortCommand
         <ST><![CDATA[_bCommandPending	:= FALSE;
 _nFrameCount		:= 0;
 _nFrameIndex		:= 0;
-_nAcquireStep		:= 0;
-Control.1			:= FALSE;
-_tonAcquire(IN := FALSE);
-_tonSettle(IN := FALSE);
 _tonAccess(IN := FALSE);
 
 // A FILE ACCESS IS NEVER ABANDONED HALF WAY. FB_FileIO keeps its handle and its step
 // between calls, so walking away from it would carry an open file into the next
-// command. It is allowed to finish, and its result is dropped.
-IF _eState = E_RFID_IQT1_State.LoadTag OR _eState = E_RFID_IQT1_State.SaveTag THEN
+// command. It is allowed to finish, and its result is dropped. The same holds for
+// FB_CreateDir, which runs on the way into LoadTag.
+IF _eState = E_RFID_IQT1_State.CreateDir
+	OR _eState = E_RFID_IQT1_State.LoadTag
+	OR _eState = E_RFID_IQT1_State.SaveTag THEN
 	_bAborted := TRUE;
-ELSIF _eState <> E_RFID_IQT1_State.Init AND _eState <> E_RFID_IQT1_State.CreateDir THEN
+ELSIF _eState <> E_RFID_IQT1_State.Init THEN
 	_eState := E_RFID_IQT1_State.Idle;
-END_IF]]></ST>
-      </Implementation>
-    </Method>
-    <Method Name="AcquireTag" Id="{6bac66fd-2b1f-4a5e-80ac-c25fdb5692d8}">
-      <Declaration><![CDATA[// Ask the twin which tag is in front of the head. TRUE once nTagUid is decided.
-METHOD PRIVATE AcquireTag : BOOL
-]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[IF bSimulateTag THEN
-	nTagUid		:= nSimulatedUid;
-	bTagPresent	:= nTagUid <> 0;
-	AcquireTag	:= TRUE;
-	RETURN;
-END_IF
-
-// One timeout over both steps. Without Unity the echo never comes, and that is no tag.
-_tonAcquire(IN := TRUE, PT := stConfig.tAcquireTimeout);
-
-CASE _nAcquireStep OF
-	0:	// RELEASE FIRST. The DataReader reads on a fresh trigger, and the echo of the
-		// last one may still be up - sampling it would hand over a stale UID.
-		Control.1 := FALSE;
-		IF NOT Status.1 THEN
-			_nAcquireStep := 1;
-		END_IF
-	1:
-		Control.1 := TRUE;
-END_CASE
-
-_tonSettle(IN := _nAcquireStep = 1 AND Status.1, PT := stConfig.tSettle);
-
-IF _tonSettle.Q OR _tonAcquire.Q THEN
-	IF _tonSettle.Q THEN
-		nTagUid := StatusData;
-	ELSE
-		nTagUid := 0;
-	END_IF
-	bTagPresent		:= nTagUid <> 0;
-	Control.1		:= FALSE;
-	_nAcquireStep	:= 0;
-	_tonAcquire(IN := FALSE);
-	_tonSettle(IN := FALSE);
-	AcquireTag		:= TRUE;
 END_IF]]></ST>
       </Implementation>
     </Method>
@@ -191,10 +162,12 @@ VAR
 	aUid		: ARRAY[0..7] OF BYTE;
 	i			: INT;
 	nMaxRead	: UDINT;
+	bNoFile		: BOOL;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[nMaxRead := MIN(stConfig.nMaxReadLength, MAX_READ_LENGTH);
+        <ST><![CDATA[nMaxRead	:= MIN(stConfig.nMaxReadLength, MAX_READ_LENGTH);
+bNoFile		:= _bNoDirectory OR nFileErrorId <> 0;
 
 CASE _nCommand OF
 	E_RFID_IQT1_Command.ChangeTag:
@@ -206,20 +179,20 @@ CASE _nCommand OF
 		PrepareResponse(E_RFID_IQT1_Status.Ok, 0, 0);
 
 	E_RFID_IQT1_Command.SingleReadFixcode:
-		IF nTagUid = 0 THEN
+		IF _nCommandUid = 0 THEN
 			PrepareResponse(E_RFID_IQT1_Status.NoTag, 0, 0);
 		ELSE
-			// Most significant byte first.
+			// The UniqueId, most significant byte first.
 			FOR i := 0 TO 7 DO
-				aUid[i] := LWORD_TO_BYTE(SHR(nTagUid, 56 - 8 * i));
+				aUid[i] := ULINT_TO_BYTE(SHR(_nCommandUid, 56 - 8 * i));
 			END_FOR
 			PrepareResponse(E_RFID_IQT1_Status.Ok, ADR(aUid), TO_UDINT(SIZEOF(aUid)));
 		END_IF
 
 	E_RFID_IQT1_Command.SingleRead:
-		IF nTagUid = 0 THEN
+		IF _nCommandUid = 0 THEN
 			PrepareResponse(E_RFID_IQT1_Status.NoTag, 0, 0);
-		ELSIF nFileErrorId <> 0 OR _nLength = 0 OR _nLength > nMaxRead
+		ELSIF bNoFile OR _nLength = 0 OR _nLength > nMaxRead
 			OR _nAddress + _nLength > _nMemorySize THEN
 			PrepareResponse(E_RFID_IQT1_Status.Error, 0, 0);
 		ELSE
@@ -227,15 +200,15 @@ CASE _nCommand OF
 		END_IF
 
 	E_RFID_IQT1_Command.SingleWrite:
-		IF nTagUid = 0 THEN
+		IF _nCommandUid = 0 THEN
 			PrepareResponse(E_RFID_IQT1_Status.NoTag, 0, 0);
-		ELSIF nFileErrorId <> 0 OR _nLength = 0 OR _nLength > MAX_WRITE_LENGTH
+		ELSIF bNoFile OR _nLength = 0 OR _nLength > MAX_WRITE_LENGTH
 			OR _nAddress + _nLength > _nMemorySize THEN
 			PrepareResponse(E_RFID_IQT1_Status.Error, 0, 0);
 		ELSE
 			MEMCPY(ADR(_aMemory[_nAddress]), ADR(_aCommand[10]), _nLength);
 			// Answered only once the file is written, so a PLC that sees 16#00 can rely
-			// on the next head reading it back.
+			// on the next head - and Unity - reading it back.
 			_eState := E_RFID_IQT1_State.SaveTag;
 		END_IF
 
@@ -386,20 +359,8 @@ _aResponse[0] := nIn;]]></ST>
       <Implementation>
         <ST><![CDATA[CASE _eState OF
 	E_RFID_IQT1_State.Init:
-		_nMemorySize := MIN(stConfig.nMemorySize, TO_UDINT(SIZEOF(_aMemory)));
-		_fbCreateDir(bExecute := FALSE);
-		_eState := E_RFID_IQT1_State.CreateDir;
-
-	E_RFID_IQT1_State.CreateDir:
-		// FB_FileIO.Write, finding no folder, creates one named after the FILE - so the
-		// folder is made here first. Its error is ignored: it is the normal answer when
-		// the folder already exists, and a folder that really cannot be made shows up as
-		// nFileErrorId on the first command.
-		_fbCreateDir(sNetId := '', sPathName := stConfig.sDirectory, ePath := PATH_GENERIC, bExecute := TRUE);
-		IF NOT _fbCreateDir.bBusy THEN
-			_fbCreateDir(bExecute := FALSE);
-			_eState := E_RFID_IQT1_State.Idle;
-		END_IF
+		_nMemorySize	:= MIN(stConfig.nMemorySize, FILE_SIZE);
+		_eState			:= E_RFID_IQT1_State.Idle;
 
 	E_RFID_IQT1_State.Idle:
 		IF _bCommandPending THEN
@@ -407,42 +368,64 @@ _aResponse[0] := nIn;]]></ST>
 			_nCommand			:= _aCommand[5];
 			_nAddress			:= SHL(BYTE_TO_UDINT(_aCommand[6]), 8) OR BYTE_TO_UDINT(_aCommand[7]);
 			_nLength			:= SHL(BYTE_TO_UDINT(_aCommand[8]), 8) OR BYTE_TO_UDINT(_aCommand[9]);
+			_nCommandUid		:= nTagUid;
+			_bNoDirectory		:= LEN(sDirectory) = 0;
+			nFileErrorId		:= 0;
 			nLastCommand		:= _nCommand;
-			IF _nCommand = E_RFID_IQT1_Command.SingleRead
-				OR _nCommand = E_RFID_IQT1_Command.SingleWrite
-				OR _nCommand = E_RFID_IQT1_Command.SingleReadFixcode THEN
-				_nAcquireStep	:= 0;
-				_eState			:= E_RFID_IQT1_State.AcquireTag;
+
+			IF _nCommandUid <> 0 AND NOT _bNoDirectory
+				AND (_nCommand = E_RFID_IQT1_Command.SingleRead OR _nCommand = E_RFID_IQT1_Command.SingleWrite) THEN
+				_sDirectory := sDirectory;
+				IF RIGHT(_sDirectory, 1) <> '\' AND RIGHT(_sDirectory, 1) <> '/' THEN
+					_sDirectory := CONCAT(_sDirectory, '\');
+				END_IF
+				_sFileName		:= TagFileName(_nCommandUid);
+				_bLoadRetried	:= FALSE;
+				// FB_FileIO.Read CREATES A MISSING FILE FROM THE BUFFER, so the buffer is
+				// cleared first: a tag with no product data file yet starts zeroed.
+				MEMSET(ADR(_aMemory), 0, SIZEOF(_aMemory));
+				IF _sDirectory <> _sCheckedDirectory THEN
+					_fbCreateDir(bExecute := FALSE);
+					_eState := E_RFID_IQT1_State.CreateDir;
+				ELSE
+					_eState := E_RFID_IQT1_State.LoadTag;
+				END_IF
 			ELSE
-				_eState			:= E_RFID_IQT1_State.Execute;
+				IF _bNoDirectory AND (_nCommand = E_RFID_IQT1_Command.SingleRead OR _nCommand = E_RFID_IQT1_Command.SingleWrite) THEN
+					ADSLOGSTR(ADSLOG_MSGTYPE_WARN, CONCAT(_sPath, ': %s'), 'sDirectory not set - answered 16#04.');
+				END_IF
+				_eState := E_RFID_IQT1_State.Execute;
 			END_IF
 		END_IF
 
-	E_RFID_IQT1_State.AcquireTag:
-		IF AcquireTag() THEN
-			nFileErrorId := 0;
-			IF nTagUid <> 0 AND _nCommand <> E_RFID_IQT1_Command.SingleReadFixcode THEN
-				// FB_FileIO.Read CREATES A MISSING FILE FROM THE BUFFER, so the buffer is
-				// cleared first: a tag seen for the first time starts with zeroed memory.
-				MEMSET(ADR(_aMemory), 0, SIZEOF(_aMemory));
-				_sFileName		:= TagFileName(nTagUid);
-				_bLoadRetried	:= FALSE;
-				_eState			:= E_RFID_IQT1_State.LoadTag;
+	E_RFID_IQT1_State.CreateDir:
+		// FB_FileIO.Write, finding no folder, creates one named after the FILE - so the
+		// folder is made sure of first, once per folder. Its error is ignored: it is the
+		// normal answer when the folder already exists, and a folder that really cannot
+		// be made shows up as nFileErrorId on the file access that follows.
+		_fbCreateDir(sNetId := '', sPathName := _sDirectory, ePath := PATH_GENERIC, bExecute := TRUE);
+		IF NOT _fbCreateDir.bBusy THEN
+			_fbCreateDir(bExecute := FALSE);
+			_sCheckedDirectory := _sDirectory;
+			IF _bAborted THEN
+				_bAborted	:= FALSE;
+				_eState		:= E_RFID_IQT1_State.Idle;
 			ELSE
-				_eState		:= E_RFID_IQT1_State.Execute;
+				_eState		:= E_RFID_IQT1_State.LoadTag;
 			END_IF
 		END_IF
 
 	E_RFID_IQT1_State.LoadTag:
 		// Called every cycle until done, with the same arguments. Read and Write share
 		// one file handle inside FB_FileIO, so only one of them ever runs at a time.
-		IF _fbFileIO.Read(_sFileName, ADR(_aMemory), _nMemorySize) THEN
+		// Always the whole file: what goes back must be the size Unity wrote.
+		IF _fbFileIO.Read(_sFileName, ADR(_aMemory), FILE_SIZE) THEN
 			nFileErrorId := _fbFileIO.nErrorId;
 			IF _bAborted THEN
 				_bAborted	:= FALSE;
 				_eState		:= E_RFID_IQT1_State.Idle;
 			ELSIF nFileErrorId <> 0 AND NOT _bLoadRetried THEN
-				// A tag seen for the first time: Read fails to open, creates the file through
+				// No product data file yet: Read fails to open, creates the file through
 				// Write, and may still report the open error it started from. The file
 				// exists now, so read once more before calling it an error. Read clears
 				// nErrorId itself when it opens.
@@ -461,11 +444,11 @@ _aResponse[0] := nIn;]]></ST>
 		END_IF
 
 	E_RFID_IQT1_State.SaveTag:
-		IF _fbFileIO.Write(_sFileName, ADR(_aMemory), _nMemorySize) THEN
+		IF _fbFileIO.Write(_sFileName, ADR(_aMemory), FILE_SIZE) THEN
 			nFileErrorId := _fbFileIO.nErrorId;
 			IF _bAborted THEN
-				_bAborted := FALSE;
-				_eState := E_RFID_IQT1_State.Idle;
+				_bAborted	:= FALSE;
+				_eState		:= E_RFID_IQT1_State.Idle;
 			ELSIF nFileErrorId = 0 THEN
 				PrepareResponse(E_RFID_IQT1_Status.Ok, 0, 0);
 			ELSE
@@ -494,16 +477,15 @@ MEMCPY(pStatus, ADR(_aResponse), SIZEOF(_aResponse));]]></ST>
       </Implementation>
     </Method>
     <Method Name="TagFileName" Id="{f724cdc3-c262-44e2-b8a6-7f14c9abd91f}">
-      <Declaration><![CDATA[// <sDirectory>Tag_<UID as 16 hex digits>.bin
+      <Declaration><![CDATA[// <_sDirectory>ID<UniqueId>.data - OC.Data.ProductDataFactory's name, UniqueId in decimal.
 METHOD PRIVATE TagFileName : T_MaxString
 VAR_INPUT
-	nUid	: LWORD;
+	nUid	: ULINT;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TagFileName := CONCAT(stConfig.sDirectory, CONCAT('Tag_', CONCAT(
-	DWORD_TO_HEXSTR(LWORD_TO_DWORD(SHR(nUid, 32)), 8, FALSE), CONCAT(
-	DWORD_TO_HEXSTR(LWORD_TO_DWORD(nUid), 8, FALSE), '.bin'))));]]></ST>
+        <ST><![CDATA[TagFileName := CONCAT(_sDirectory, CONCAT(stConfig.sFilePrefix,
+	CONCAT(ULINT_TO_STRING(nUid), stConfig.sFileExtension)));]]></ST>
       </Implementation>
     </Method>
   </POU>

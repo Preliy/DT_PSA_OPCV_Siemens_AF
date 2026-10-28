@@ -1,20 +1,20 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4026.19">
   <DUT Name="ST_RFID_IQT1_Config" Id="{944d7b6e-005c-415a-9610-e8151b3a9df4}">
-    <Declaration><![CDATA[// Parameters of FB_RFID_IQT1. The times are modelled, not measured.
+    <Declaration><![CDATA[// Parameters of FB_RFID_IQT1. The folder is not here: it is the sDirectory input.
 TYPE ST_RFID_IQT1_Config :
 STRUCT
-	// One file per tag, Tag_<UID as 16 hex digits>.bin, holding the tag's raw user memory.
-	// Every head that shares this folder sees the same tags - that is how data written at
-	// one station is read at the next. Only the last folder level is created; the parent
-	// must exist. Keep the trailing backslash.
-	sDirectory			: T_MaxString := 'C:\TwinCAT\RFID\';
-	nMemorySize			: UDINT := 2048;	// bytes of user memory per tag, capped at the 8 KB buffer
+	// The file name is OC's (OC.Data.ProductDataFactory): ID<UniqueId>.data. Change it only
+	// together with the Unity side.
+	sFilePrefix			: STRING(31) := 'ID';
+	sFileExtension		: STRING(31) := '.data';
+
+	// Bytes the PLC may address. The whole product data file by default; set the real
+	// tag's user memory size to get 16#04 beyond it. Capped at the file size.
+	nMemorySize			: UDINT := 32000;
 	nMaxReadLength		: UDINT := 192;		// bytes per Single Read - the P+F block's ReadData holds 192
 
-	tAccessTime			: TIME := T#30MS;	// air time per command, after the tag is known
-	tSettle				: TIME := T#20MS;	// DataReader: hold after the trigger echo before sampling the UID
-	tAcquireTimeout		: TIME := T#500MS;	// DataReader: no answer in this time means no tag
+	tAccessTime			: TIME := T#30MS;	// modelled air time per command, after the tag is known
 
 	nPQI				: BYTE := 16#A0;	// IO-Link port qualifier, byte [32] - PQ valid + DevCom. Shown by the block, not evaluated
 END_STRUCT

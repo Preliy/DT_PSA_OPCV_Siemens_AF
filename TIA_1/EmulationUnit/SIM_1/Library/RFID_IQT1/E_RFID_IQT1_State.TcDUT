@@ -7,12 +7,11 @@
 TYPE E_RFID_IQT1_State :
 (
 	Init		:= 0,	// first cycle
-	CreateDir,			// make sure the tag-file folder exists
 	Idle,				// ready for a request
-	AcquireTag,			// ask the twin which tag is in front of the head
-	LoadTag,			// read the tag's memory from its file
+	CreateDir,			// make sure the product data folder exists, once per folder
+	LoadTag,			// read the tag's product data file
 	Execute,			// air time, then build the response
-	SaveTag,			// write the tag's memory back to its file
+	SaveTag,			// write the product data file back
 	Respond				// hand the prepared frames to the PLC, one per acknowledgement
 ) INT;
 END_TYPE]]></Declaration>
